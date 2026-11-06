@@ -54,10 +54,13 @@ def _build_reading_entities(hub: CezHub, uid: str, ean: Optional[str]) -> list[E
 
 def _build_detail_entities(hub: CezHub, uid: str, ean: Optional[str]) -> list[Entity]:
     """Static entities derived from the supply-point detail (no extra HTTP)."""
-    return [
+    entities: list[Entity] = [
         CezWeekReadingSensor(hub, uid, ean),
         CezTariffSensor(hub, uid, ean),
     ]
+    if ean and _detail_for_uid(hub, uid).get("hdo"):
+        entities.append(CezSignalScheduleSensor(hub, ean))
+    return entities
 
 
 async def async_setup_platform(hass: HomeAssistant, config, async_add_entities, discovery_info=None):
@@ -295,3 +298,32 @@ def _last_read_date(detail: Dict[str, Any]) -> Optional[str]:
         if meters and isinstance(meters[0], dict):
             val = meters[0].get("lastReadDate")
     return _iso_date(val)
+
+
+class CezSignalScheduleSensor(CoordinatorEntity, SensorEntity):
+    """HDO switching schedule for the coming days, as returned by the portal.
+
+    State is the time of the last successful download. The ``signals``
+    attribute carries the raw list (``datum``, ``den``, ``signal``, ``casy``) so
+    templates can build their own tariff schedule. When a refresh fails, the
+    last good schedule stays and the state does not move, which makes a stale
+    schedule easy to detect.
+    """
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, hub: CezHub, ean: str) -> None:
+        super().__init__(hub.signals_coordinator)
+        self._hub = hub
+        self._ean = ean
+        self._attr_name = "HDO – rozpis"
+        self._attr_unique_id = f"{ean}_hdo_schedule"
+
+    @property
+    def native_value(self):
+        return self._hub.signals_updated.get(self._ean)
+
+    @property
+    def extra_state_attributes(self) -> Dict[str, Any]:
+        data = self.coordinator.data or {}
+        return {"ean": self._ean, "signals": (data.get(self._ean) or {}).get("signals", [])}

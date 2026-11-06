@@ -47,6 +47,7 @@ Po restartu integrace vytvoří:
   - "Poslední stav celkem" (kWh)
   - "Týden odečtu" – číslo týdne plánovaného odečtu (atributy: interval, sazba, distributor)
   - "Sazba distribuce" – aktuální sazba (např. `D57D`), atributy: hlavní jistič (A), počet fází, napěťová hladina
+  - "HDO – rozpis" – čas posledního úspěšného stažení rozpisu HDO, atribut `signals` = rozpis z portálu (jen OM s HDO)
 - Binární senzory:
   - "ČEZ Odstávka právě probíhá" – `on`, pokud právě teď běží odstávka (doplnění kalendáře plánovaných odstávek)
   - "ČEZ Smlouva aktivní" – `on`, pokud je distribuční smlouva ve stavu AKTIV
@@ -177,6 +178,9 @@ Základní příklad je uveden výše v této stránce. Volitelné klíče pro i
 - „Sazba distribuce“
   - Stav = aktuální distribuční sazba (např. `D57D`). Atributy: `hlavni_jistic` (A), `pocet_fazi`, `typ_mereni`, `typ_odberu`, `platnost_od`, `napetova_hladina`, `jistic_charakteristika`.
   - Užitečné při plánování instalace (EV, přímotopy, fotovoltaika) — ukazuje rezervu jističe.
+- „HDO – rozpis“ (jen OM s HDO)
+  - Stav = čas posledního úspěšného stažení rozpisu (`device_class: timestamp`). Při chybě zůstává poslední dobrý rozpis a čas se neposune, takže zastaralá data se dají snadno poznat.
+  - Atribut `signals` = rozpis z portálu na následující dny: seznam položek `datum`, `den`, `signal`, `casy` (např. `00:00-10:00; 11:00-12:00`). Hodí se pro vlastní šablony, např. tarif po hodinách pro graf cen.
 - Binární senzory:
   - „ČEZ Odstávka právě probíhá“ (`device_class: problem`) – `on`, pokud `probihajiciOdstavka`. Komplement kalendáře (ten ukazuje budoucnost, tento senzor reálný stav „teď“).
   - „ČEZ Smlouva aktivní“ – `on`, pokud `stavSmlouvyDistribuce == "AKTIV"`. Atribut `stav_text` (např. „Aktivní“).

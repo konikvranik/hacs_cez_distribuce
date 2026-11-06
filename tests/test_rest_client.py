@@ -380,3 +380,96 @@ def test_handle_login_401_triggers_relogin(requests_mock):
     client.login("user", "pass")
     result = client.common_header()
     assert result == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Expired portal session (issue #8)
+#
+# After roughly a day the portal session expires and data calls are answered
+# with the CAS login page (HTTP 200, HTML) instead of JSON. The client used to
+# re-login only on HTTP 401, so every refresh failed with "Expecting value:
+# line 1 column 1 (char 0)" until Home Assistant was restarted.
+# ---------------------------------------------------------------------------
+
+def test_html_instead_of_json_triggers_relogin_then_retry(mocked_client, requests_mock):
+    b = mocked_client._base_url
+    mocked_client.login("user", "pass")
+    requests_mock.get(
+        f"{b}/prehled-om?path=supply-point-detail/signals/E1",
+        [
+            {"status_code": 200, "text": LOGIN_HTML, "headers": {"Content-Type": "text/html"}},
+            {"json": _envelope({"signals": [{"datum": "25.10.2026", "casy": "00:00-10:00"}]})},
+        ],
+    )
+    logins_before = sum(1 for r in requests_mock.request_history if r.method == "POST" and "mepas.cez.cz" in r.url)
+
+    result = mocked_client.get_signals("E1")
+
+    assert result == {"signals": [{"datum": "25.10.2026", "casy": "00:00-10:00"}]}
+    logins_after = sum(1 for r in requests_mock.request_history if r.method == "POST" and "mepas.cez.cz" in r.url)
+    assert logins_after == logins_before + 1
+
+
+def test_persistent_html_raises_unable_to_login(mocked_client, requests_mock):
+    b = mocked_client._base_url
+    mocked_client.login("user", "pass")
+    requests_mock.get(
+        f"{b}/prehled-om?path=supply-point-detail/signals/E1",
+        status_code=200, text=LOGIN_HTML, headers={"Content-Type": "text/html"},
+    )
+    with pytest.raises(Exception, match="Unable to login"):
+        mocked_client.get_signals("E1")
+
+
+def test_login_starts_with_empty_cookie_jar(mocked_client, requests_mock):
+    """A fresh login must not carry the expired session's cookies (like a restart)."""
+    mocked_client._session.cookies.set("JSESSIONID", "expired", domain="dip.cezdistribuce.cz")
+    mocked_client._session.cookies.set("TGC", "expired", domain="mepas.cez.cz")
+
+    mocked_client.login("user", "pass")
+
+    first_login_get = next(r for r in requests_mock.request_history if r.method == "GET" and "/cas/login" in r.url)
+    assert "expired" not in (first_login_get.headers.get("Cookie") or "")
+
+
+def test_html_from_token_endpoint_during_relogin_is_bounded(mocked_client, requests_mock):
+    """Wrong password or a maintenance page: the token endpoint answers HTML too.
+
+    The re-login must not recurse (login -> token -> re-login -> ...), which would
+    hammer CAS with logins until RecursionError and risk an account lockout.
+    """
+    b = mocked_client._base_url
+    mocked_client.login("user", "pass")
+    html = {"status_code": 200, "text": LOGIN_HTML, "headers": {"Content-Type": "text/html"}}
+    requests_mock.get(f"{b}/prehled-om?path=supply-point-detail/signals/E1", **html)
+    requests_mock.get(f"{b}/rest-auth-api?path=/token/get", **html)
+    logins_before = sum(1 for r in requests_mock.request_history if r.method == "POST" and "mepas.cez.cz" in r.url)
+
+    with pytest.raises(Exception, match="Unable to login"):
+        mocked_client.get_signals("E1")
+
+    logins = sum(1 for r in requests_mock.request_history if r.method == "POST" and "mepas.cez.cz" in r.url)
+    assert logins - logins_before == 1
+
+
+def test_relogin_after_non_json_answer_is_logged_without_body(mocked_client, requests_mock, caplog):
+    """What the portal returns for an expired session is not documented; log its shape (no body)."""
+    import logging
+
+    b = mocked_client._base_url
+    mocked_client.login("user", "pass")
+    requests_mock.get(
+        f"{b}/prehled-om?path=supply-point-detail/signals/E1",
+        [
+            {"status_code": 200, "text": LOGIN_HTML, "headers": {"Content-Type": "text/html;charset=UTF-8"}},
+            {"json": _envelope({"signals": []})},
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger="custom_components.cez_distribuce"):
+        mocked_client.get_signals("E1")
+
+    records = [r for r in caplog.records if r.name.startswith("custom_components.cez_distribuce")]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "200" in message and "text/html" in message
+    assert "execution" not in message   # no response body

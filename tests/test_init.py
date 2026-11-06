@@ -262,3 +262,115 @@ async def test_setup_entry_failure_surfaces_as_setup_error(
 
     # Login blew up inside _login_and_load_static -> async_setup raised
     assert entry.state in (ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR)
+
+
+@pytest.mark.parametrize("expected_lingering_timers", [True])  # YAML setup has no unload
+async def test_yaml_setup_loads_hub_and_creates_entities(
+    hass: HomeAssistant, enable_custom_integrations, mock_client
+):
+    """Legacy YAML configuration must set up without a config entry (issue #7).
+
+    It used to fail with "Detected code that uses async_config_entry_first_refresh,
+    which is only supported for coordinators with a config entry".
+    """
+    from homeassistant.setup import async_setup_component
+
+    assert await async_setup_component(
+        hass, DOMAIN, {DOMAIN: {CONF_USERNAME: "test-user", CONF_PASSWORD: "test-pass"}}
+    )
+    await hass.async_block_till_done()
+
+    hub: CezHub = hass.data[DOMAIN]["legacy"]
+    assert hub.signals_coordinator.data == {"8591824000000011": SIGNALS_PAYLOAD}
+    assert any(s.entity_id.startswith("calendar.") for s in hass.states.async_all())
+    assert _schedule_state(hass).attributes["signals"] == SIGNALS_PAYLOAD["signals"]
+
+
+def _schedule_state(hass: HomeAssistant):
+    """The "HDO – rozpis" sensor: raw 7-day schedule + time of the last good download."""
+    states = [s for s in hass.states.async_all("sensor") if "signals" in s.attributes]
+    assert len(states) == 1, "expected exactly one HDO schedule sensor"
+    return states[0]
+
+
+async def test_schedule_sensor_exposes_raw_signals_and_download_time(
+    hass: HomeAssistant, enable_custom_integrations, mock_client
+):
+    await _add_loaded_entry(hass)
+
+    state = _schedule_state(hass)
+    assert state.attributes["signals"] == SIGNALS_PAYLOAD["signals"]
+    assert state.attributes["device_class"] == "timestamp"
+    assert state.state not in ("unknown", "unavailable")
+
+
+async def test_schedule_sensor_keeps_last_good_schedule_when_refresh_fails(
+    hass: HomeAssistant, enable_custom_integrations, mock_client, freezer
+):
+    entry = await _add_loaded_entry(hass)
+    hub: CezHub = hass.data[DOMAIN][entry.entry_id]
+    newer = {"signals": [{"datum": "02.01.2025", "casy": "00:00 - 06:00", "nazevSignalu": "NT"}]}
+
+    freezer.tick(3600)
+    mock_client.get_signals.return_value = newer
+    await hub.signals_coordinator.async_refresh()
+    await hass.async_block_till_done()
+    good = _schedule_state(hass)
+    assert good.attributes["signals"] == newer["signals"]
+
+    freezer.tick(3600)
+    mock_client.get_signals.side_effect = Exception("session expired")
+    await hub.signals_coordinator.async_refresh()
+    await hass.async_block_till_done()
+    after_failure = _schedule_state(hass)
+    assert after_failure.attributes["signals"] == newer["signals"]
+    assert after_failure.state == good.state
+
+
+async def test_failed_signals_refresh_logs_the_ean(
+    hass: HomeAssistant, enable_custom_integrations, mock_client, caplog
+):
+    """The warning names the supply point instead of '?' (issue #8)."""
+    entry = await _add_loaded_entry(hass)
+    hub: CezHub = hass.data[DOMAIN][entry.entry_id]
+
+    mock_client.get_signals.side_effect = Exception("session expired")
+    await hub.signals_coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert "Failed refreshing signals for 8591824000000011: session expired" in caplog.text
+
+
+async def test_schedule_timestamp_moves_on_success_but_not_on_empty_schedule(
+    hass: HomeAssistant, enable_custom_integrations, mock_client, freezer
+):
+    """An empty schedule from the portal is not a successful download."""
+    entry = await _add_loaded_entry(hass)
+    hub: CezHub = hass.data[DOMAIN][entry.entry_id]
+    first = _schedule_state(hass).state
+
+    freezer.tick(3600)
+    await hub.signals_coordinator.async_refresh()
+    await hass.async_block_till_done()
+    moved = _schedule_state(hass)
+    assert moved.state != first
+
+    freezer.tick(3600)
+    mock_client.get_signals.return_value = {"signals": []}
+    await hub.signals_coordinator.async_refresh()
+    await hass.async_block_till_done()
+    after_empty = _schedule_state(hass)
+    assert after_empty.attributes["signals"] == SIGNALS_PAYLOAD["signals"]
+    assert after_empty.state == moved.state
+
+
+async def test_schedule_timestamp_set_by_startup_load_even_if_first_refresh_fails(
+    hass: HomeAssistant, enable_custom_integrations, mock_client
+):
+    mock_client.get_signals.side_effect = [SIGNALS_PAYLOAD, Exception("portal down")]
+
+    await _add_loaded_entry(hass)
+
+    state = _schedule_state(hass)
+    assert state.state not in ("unknown", "unavailable")
+    assert state.attributes["signals"] == SIGNALS_PAYLOAD["signals"]
