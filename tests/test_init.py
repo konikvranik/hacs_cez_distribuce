@@ -327,6 +327,20 @@ async def test_schedule_sensor_keeps_last_good_schedule_when_refresh_fails(
     assert after_failure.state == good.state
 
 
+async def test_failed_signals_refresh_logs_the_ean(
+    hass: HomeAssistant, enable_custom_integrations, mock_client, caplog
+):
+    """The warning names the supply point instead of '?' (issue #8)."""
+    entry = await _add_loaded_entry(hass)
+    hub: CezHub = hass.data[DOMAIN][entry.entry_id]
+
+    mock_client.get_signals.side_effect = Exception("session expired")
+    await hub.signals_coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert "Failed refreshing signals for 8591824000000011: session expired" in caplog.text
+
+
 async def test_schedule_timestamp_moves_on_success_but_not_on_empty_schedule(
     hass: HomeAssistant, enable_custom_integrations, mock_client, freezer
 ):

@@ -159,7 +159,7 @@ class CezHub:
                         p.signals = result[ean] = signals
                         self.signals_updated[ean] = dt.datetime.now(dt.timezone.utc)
                     except Exception as e:
-                        _LOGGER.warning("Failed refreshing signals for %s: %s", getattr(p.supply_point_detail, 'ean', '?'), e)
+                        _LOGGER.warning("Failed refreshing signals for %s: %s", ean, e)
                         # Fallback to last known good schedule
                         if ean:
                             result[ean] = p.signals
